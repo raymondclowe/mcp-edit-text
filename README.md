@@ -15,7 +15,7 @@ uvx --from git+https://github.com/raymondlowe/mcp-edit-text mcp-edit-text
 ```
 {
   "mcpServers": {
-    ""FrontPage-DWT-Region-Editor": {": {
+    "FrontPage-DWT-Region-Editor": {
       "command": "uvx",
       "args": [
         "--from",

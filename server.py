@@ -415,7 +415,7 @@ if __name__ == "__main__":
 ```
 {
   "mcpServers": {
-    ""FrontPage-DWT-Region-Editor": {": {
+    "FrontPage-DWT-Region-Editor": {
       "command": "uvx",
       "args": [
         "--from",
