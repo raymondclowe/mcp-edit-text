@@ -1,0 +1,2 @@
+[console_scripts]
+mcp-edit-text = server:mcp.run

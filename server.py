@@ -1,7 +1,7 @@
 # server.py
 import re
 import os
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple, Optional, Literal
 
 import markdown
 from markdown.extensions.tables import TableExtension
@@ -16,7 +16,7 @@ BEGIN_MARKER_PATTERN = re.compile(r'<!--\s*#BeginEditable\s*"([^"]+)"\s*-->')
 END_MARKER_PATTERN = re.compile(r'<!--\s*#EndEditable\s*-->')
 
 # Create an MCP server
-mcp = FastMCP("FrontPageDWTRegionEditor", description="MCP Server for editing editable regions in HTML files created with Microsoft FrontPage's .DWT templating system. Only suitable for files that contain #BeginEditable regions.")
+mcp = FastMCP("FrontPageDWTRegionEditor", instructions="MCP Server for editing editable regions in HTML files created with Microsoft FrontPage's .DWT templating system. Only suitable for files that contain #BeginEditable regions.")
 
 # --- Helper Functions ---
 
@@ -61,9 +61,9 @@ def _prepare_content_lines(content_string: str, line_ending: str) -> List[str]:
     content_lines = [line + line_ending for line in split_lines]
     return content_lines
 
-def _update_region_content(file_path: str, region_name: str, new_region_content_str: str, ctx: Context) -> bool:
+async def _update_region_content(file_path: str, region_name: str, new_region_content_str: str, ctx: Context) -> bool:
     """Core logic to replace the content of a region."""
-    region_info = _find_region(file_path, region_name, ctx)
+    region_info = await _find_region(file_path, region_name, ctx)
     if not region_info:
         return False  # Error already logged by _find_region
 
@@ -83,17 +83,17 @@ def _update_region_content(file_path: str, region_name: str, new_region_content_
         )
 
         _write_file_lines(full_path, new_file_lines, line_ending)
-        ctx.info(f"Successfully updated region '{region_name}' in file '{file_path}'")
+        await ctx.info(f"Successfully updated region '{region_name}' in file '{file_path}'")
         return True
 
     except Exception as e:
-        ctx.error(f"Error writing region '{region_name}' to file {file_path}: {e}")
+        await ctx.error(f"Error writing region '{region_name}' to file {file_path}: {e}")
         raise  # Re-raise to report via MCP
 
 # --- MCP Tools ---
 
 @mcp.tool(name="get_regions", description="Lists all editable regions with names and line ranges from a given file.")
-def get_regions(
+async def get_regions(
     file_path: str = Field(description="The relative path to the file to analyze"),
     ctx: Context = Field(description="The MCP context object")
 ) -> List[Dict[str, Any]]:
@@ -109,7 +109,7 @@ def get_regions(
     full_path = os.path.abspath(file_path)
 
     if not os.path.exists(full_path):
-        ctx.error(f"File not found: {file_path}")
+        await ctx.error(f"File not found: {file_path}")
         return []
 
     try:
@@ -125,12 +125,12 @@ def get_regions(
                     raise ValueError(f"Nested region detected: Found BeginEditable for '{begin_match.group(1)}' inside region '{current_region_name}' at line {line_num}")
                 current_region_name = begin_match.group(1)
                 current_region_start_line = line_num
-                # ctx.info(f"Found start of region '{current_region_name}' at line {line_num}") # Less verbose
+                # await ctx.info(f"Found start of region '{current_region_name}' at line {line_num}") # Less verbose
 
             elif end_match:
                 if current_region_name is None:
                     raise ValueError(f"Mismatched marker: Found EndEditable without a matching BeginEditable at line {line_num}")
-                # ctx.info(f"Found end of region '{current_region_name}' at line {line_num}") # Less verbose
+                # await ctx.info(f"Found end of region '{current_region_name}' at line {line_num}") # Less verbose
                 regions.append({
                     "name": current_region_name,
                     "start_line": current_region_start_line,
@@ -143,45 +143,35 @@ def get_regions(
              raise ValueError(f"Mismatched marker: Reached end of file while inside region '{current_region_name}' which started at line {current_region_start_line}")
 
     except Exception as e:
-        ctx.error(f"Error processing file {file_path}: {e}")
+        await ctx.error(f"Error processing file {file_path}: {e}")
         raise
 
-    ctx.info(f"Found {len(regions)} regions in {file_path}")
+    await ctx.info(f"Found {len(regions)} regions in {file_path}")
     return regions
 
 # Helper function to find a specific region (avoids code duplication)
 # Now uses the refactored get_regions
-def _find_region(file_path: str, region_name: str, ctx: Context) -> Optional[Dict[str, Any]]:
+async def _find_region(file_path: str, region_name: str, ctx: Context) -> Optional[Dict[str, Any]]:
     """Finds a specific region by name in a file."""
     try:
-        regions = get_regions(file_path=file_path, ctx=ctx) # Reuse the existing tool logic, pass ctx explicitly
+        regions = await get_regions(file_path=file_path, ctx=ctx) # Reuse the existing tool logic, pass ctx explicitly
         for region in regions:
             if region["name"] == region_name:
                 return region
-        ctx.error(f"Region '{region_name}' not found in file '{file_path}'")
+        await ctx.error(f"Region '{region_name}' not found in file '{file_path}'")
         return None
     except Exception as e:
         # If get_regions raises an error (e.g., nested/mismatched markers), catch it here
-        ctx.error(f"Failed to find region '{region_name}' due to error in get_regions: {e}")
+        await ctx.error(f"Failed to find region '{region_name}' due to error in get_regions: {e}")
         return None
 
 
-@mcp.tool()
-def get_region(
-    file_path: str = Field(description="The relative path to the file"),
-    region_name: str = Field(description="The name of the editable region"),
-    output_format: str = Field(description="The format of the output content", default="html", enum=["html", "markdown"]),
-    output_file_path: Optional[str] = Field(description="Optional path to save the extracted content to", default=None),
-    ctx: Context = Field(description="The MCP context object") # Added ctx for logging
-) -> Optional[str]:
+async def _get_region_content_string(file_path: str, region_name: str, output_format: str, ctx: Context) -> Optional[str]:
     """
-    Retrieves the current content of a specified editable region.
-    Optionally saves the content to a specified file.
-
-    Returns:
-        Optional[str]: The current content of the region in the specified format, or None if not found/error.
+    Helper function to get region content as a string.
+    Returns None if region not found or error occurs.
     """
-    region_info = _find_region(file_path, region_name, ctx)
+    region_info = await _find_region(file_path, region_name, ctx)
     if not region_info:
         return None
 
@@ -195,39 +185,56 @@ def get_region(
         if output_format == "markdown":
             # Convert HTML to markdown
             h = html2text.HTML2Text()
-            # Configure the converter if needed, e.g., h.ignore_links = True
             final_content = h.handle(region_content_html)
-
-        # Save to file if requested
-        if output_file_path:
-            full_output_path = os.path.abspath(output_file_path)
-            try:
-                # Ensure directory exists
-                os.makedirs(os.path.dirname(full_output_path), exist_ok=True)
-                with open(full_output_path, 'w', encoding='utf-8') as f_out:
-                    f_out.write(final_content)
-                ctx.info(f"Successfully saved region '{region_name}' content ({output_format}) to '{output_file_path}'")
-            except Exception as e_write:
-                ctx.error(f"Error writing region content to file {output_file_path}: {e_write}")
-                # Continue to return the content even if writing failed, but log the error
 
         return final_content
 
     except Exception as e:
-        ctx.error(f"Error reading region '{region_name}' from file {file_path}: {e}")
+        await ctx.error(f"Error reading region '{region_name}' from file {file_path}: {e}")
         raise # Re-raise to report via MCP
-
-    except Exception as e:
-        ctx.error(f"Error reading region '{region_name}' from file {file_path}: {e}")
-        raise
 
 
 @mcp.tool()
-def put_region(
+async def get_region(
+    file_path: str = Field(description="The relative path to the file"),
+    region_name: str = Field(description="The name of the editable region"),
+    output_format: Literal["html", "markdown"] = Field(description="The format of the output content", default="html"),
+    output_file_path: Optional[str] = Field(description="Optional path to save the extracted content to", default=None),
+    ctx: Context = Field(description="The MCP context object") # Added ctx for logging
+) -> Optional[str]:
+    """
+    Retrieves the current content of a specified editable region.
+    Optionally saves the content to a specified file.
+
+    Returns:
+        Optional[str]: The current content of the region in the specified format, or None if not found/error.
+    """
+    final_content = await _get_region_content_string(file_path, region_name, output_format, ctx)
+    if final_content is None:
+        return None
+
+    # Save to file if requested
+    if output_file_path:
+        full_output_path = os.path.abspath(output_file_path)
+        try:
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(full_output_path), exist_ok=True)
+            with open(full_output_path, 'w', encoding='utf-8') as f_out:
+                f_out.write(final_content)
+            await ctx.info(f"Successfully saved region '{region_name}' content ({output_format}) to '{output_file_path}'")
+        except Exception as e_write:
+            await ctx.error(f"Error writing region content to file {output_file_path}: {e_write}")
+            # Continue to return the content even if writing failed, but log the error
+
+    return final_content
+
+
+@mcp.tool()
+async def put_region(
     file_path: str = Field(description="The relative path to the file"),
     region_name: str = Field(description="The name of the editable region"),
     new_content: Optional[str] = Field(description="The new content to replace with (ignored if markdown_file_path is provided)", default=None),
-    content_type: str = Field(description="The type of content being provided (ignored if markdown_file_path is provided)", default="html", enum=["html", "markdown"]),
+    content_type: Literal["html", "markdown"] = Field(description="The type of content being provided (ignored if markdown_file_path is provided)", default="html"),
     markdown_file_path: Optional[str] = Field(description="Optional path to a markdown file whose content should be converted to HTML and inserted", default=None),
     ctx: Context = Field(description="The MCP context object")
 ) -> bool:
@@ -244,16 +251,16 @@ def put_region(
     if markdown_file_path:
         full_md_path = os.path.abspath(markdown_file_path)
         if not os.path.exists(full_md_path):
-            ctx.error(f"Markdown file not found: {markdown_file_path}")
+            await ctx.error(f"Markdown file not found: {markdown_file_path}")
             return False
         try:
             with open(full_md_path, 'r', encoding='utf-8') as md_file:
                 markdown_content = md_file.read()
             # Convert markdown file content to HTML
             final_html_content = markdown.markdown(markdown_content, extensions=[TableExtension(), FencedCodeExtension()])
-            ctx.info(f"Read content from markdown file: {markdown_file_path}")
+            await ctx.info(f"Read content from markdown file: {markdown_file_path}")
         except Exception as e:
-            ctx.error(f"Error reading or converting markdown file {markdown_file_path}: {e}")
+            await ctx.error(f"Error reading or converting markdown file {markdown_file_path}: {e}")
             return False
     elif new_content is not None:
         if content_type == "markdown":
@@ -263,24 +270,24 @@ def put_region(
             final_html_content = new_content
         else:
             # Should not happen due to enum validation, but good practice
-            ctx.error(f"Invalid content_type: {content_type}")
+            await ctx.error(f"Invalid content_type: {content_type}")
             return False
     else:
-        ctx.error("Either 'new_content' or 'markdown_file_path' must be provided.")
+        await ctx.error("Either 'new_content' or 'markdown_file_path' must be provided.")
         return False
 
     # Update the region with the final HTML content
-    return _update_region_content(file_path, region_name, final_html_content, ctx)
+    return await _update_region_content(file_path, region_name, final_html_content, ctx)
 
 
 @mcp.tool()
-def replace_in_region(
+async def replace_in_region(
     file_path: str = Field(description="The relative path to the file"),
     region_name: str = Field(description="The name of the editable region"),
     old_text: str = Field(description="The text to find and replace"),
     new_text: str = Field(description="The text to replace with"),
     count: int = Field(description="Maximum number of occurrences to replace (-1 for all)", default=-1),
-    ctx: Context = Field(description="The MCP context object", default=Context())
+    ctx: Context = Field(description="The MCP context object")
 ) -> bool:
     """
     Replaces occurrences of old_text with new_text within a specified region.
@@ -289,9 +296,9 @@ def replace_in_region(
         bool: True if the replacement was successful, False otherwise.
     """
     # Get content as HTML since we are doing text replacement
-    current_content = get_region(file_path=file_path, region_name=region_name, output_format="html", ctx=ctx)
+    current_content = await _get_region_content_string(file_path, region_name, "html", ctx)
     if current_content is None:
-        # Error already logged by get_region or _find_region
+        # Error already logged by _get_region_content_string or _find_region
         return False
 
     # Perform replacement on the string content
@@ -302,20 +309,20 @@ def replace_in_region(
         modified_content = current_content.replace(old_text, new_text, count)
 
     if modified_content == current_content:
-        ctx.info(f"No changes made: '{old_text}' not found or already replaced in region '{region_name}' of file '{file_path}'.")
+        await ctx.info(f"No changes made: '{old_text}' not found or already replaced in region '{region_name}' of file '{file_path}'.")
         # Still return True as the operation didn't fail, just made no changes
         return True
 
     # Use the helper to write the modified content back
-    return _update_region_content(file_path, region_name, modified_content, ctx)
+    return await _update_region_content(file_path, region_name, modified_content, ctx)
 
 
 @mcp.tool()
-def delete_in_region(
+async def delete_in_region(
     file_path: str = Field(description="The relative path to the file"),
     region_name: str = Field(description="The name of the editable region"),
     text_to_delete: str = Field(description="The text to find and delete"),
-    ctx: Context = Field(description="The MCP context object", default=Context())
+    ctx: Context = Field(description="The MCP context object")
 ) -> bool:
     """
     Deletes the first occurrence of specified text within a region.
@@ -324,7 +331,7 @@ def delete_in_region(
         bool: True if the deletion was successful, False otherwise.
     """
     # Use replace_in_region with count=1 and empty new_text
-    return replace_in_region(
+    return await replace_in_region(
         file_path=file_path,
         region_name=region_name,
         old_text=text_to_delete,
@@ -335,12 +342,12 @@ def delete_in_region(
 
 
 @mcp.tool()
-def insert_before_in_region(
+async def insert_before_in_region(
     file_path: str = Field(description="The relative path to the file"),
     region_name: str = Field(description="The name of the editable region"),
     find_text: str = Field(description="The text to locate for insertion point"),
     text_to_insert: str = Field(description="The text to insert"),
-    ctx: Context = Field(description="The MCP context object", default=Context())
+    ctx: Context = Field(description="The MCP context object")
 ) -> bool:
     """
     Inserts text immediately before the first occurrence of find_text within a region.
@@ -349,29 +356,29 @@ def insert_before_in_region(
         bool: True if insertion was successful, False if find_text not found or error occurred.
     """
     # Get content as HTML for text manipulation
-    current_content = get_region(file_path=file_path, region_name=region_name, output_format="html", ctx=ctx)
+    current_content = await _get_region_content_string(file_path, region_name, "html", ctx)
     if current_content is None:
         return False
 
     try:
         index = current_content.index(find_text)
         modified_content = current_content[:index] + text_to_insert + current_content[index:]
-        return _update_region_content(file_path, region_name, modified_content, ctx)
+        return await _update_region_content(file_path, region_name, modified_content, ctx)
     except ValueError:
-        ctx.error(f"Text '{find_text}' not found in region '{region_name}' of file '{file_path}'. Cannot insert.")
+        await ctx.error(f"Text '{find_text}' not found in region '{region_name}' of file '{file_path}'. Cannot insert.")
         return False
     except Exception as e:
-        ctx.error(f"Error during insert_before operation: {e}")
+        await ctx.error(f"Error during insert_before operation: {e}")
         raise
 
 
 @mcp.tool()
-def insert_after_in_region(
+async def insert_after_in_region(
     file_path: str = Field(description="The relative path to the file"),
     region_name: str = Field(description="The name of the editable region"),
     find_text: str = Field(description="The text to locate for insertion point"),
     text_to_insert: str = Field(description="The text to insert"),
-    ctx: Context = Field(description="The MCP context object", default=Context())
+    ctx: Context = Field(description="The MCP context object")
 ) -> bool:
     """
     Inserts text immediately after the first occurrence of find_text within a region.
@@ -380,7 +387,7 @@ def insert_after_in_region(
         bool: True if insertion was successful, False if find_text not found or error occurred.
     """
     # Get content as HTML for text manipulation
-    current_content = get_region(file_path=file_path, region_name=region_name, output_format="html", ctx=ctx)
+    current_content = await _get_region_content_string(file_path, region_name, "html", ctx)
     if current_content is None:
         return False
 
@@ -388,12 +395,12 @@ def insert_after_in_region(
         index = current_content.index(find_text)
         insert_point = index + len(find_text)
         modified_content = current_content[:insert_point] + text_to_insert + current_content[insert_point:]
-        return _update_region_content(file_path, region_name, modified_content, ctx)
+        return await _update_region_content(file_path, region_name, modified_content, ctx)
     except ValueError:
-        ctx.error(f"Text '{find_text}' not found in region '{region_name}' of file '{file_path}'. Cannot insert.")
+        await ctx.error(f"Text '{find_text}' not found in region '{region_name}' of file '{file_path}'. Cannot insert.")
         return False
     except Exception as e:
-        ctx.error(f"Error during insert_after operation: {e}")
+        await ctx.error(f"Error during insert_after operation: {e}")
         raise
 
 
@@ -408,7 +415,7 @@ if __name__ == "__main__":
 ```
 {
   "mcpServers": {
-    ""FrontPage-DWT-Region-Editor": {": {
+    "FrontPage-DWT-Region-Editor": {
       "command": "uvx",
       "args": [
         "--from",
